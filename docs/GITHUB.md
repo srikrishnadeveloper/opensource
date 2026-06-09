@@ -16,7 +16,9 @@ Create your own copy: `your-username/wiki-brain`
 
 ## 3. Configure environment
 
-In `.env`:
+**On Render (recommended):** paste only `GITHUB_TOKEN` in Environment. Repo and branch are automatic.
+
+**Local `.env`:**
 
 ```env
 GITHUB_TOKEN=github_pat_xxxxxxxx
@@ -24,7 +26,7 @@ GITHUB_REPO=your-username/wiki-brain
 GITHUB_BRANCH=main
 ```
 
-On **Render**, add the same variables in the dashboard (never commit `.env`).
+Never commit `.env`.
 
 ## 4. Security rules
 
