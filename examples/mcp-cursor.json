@@ -1,0 +1,13 @@
+{
+  "_comment": "LEARN: Cursor reads this to spawn server.py as a subprocess. Replace paths with your clone.",
+  "servers": {
+    "wiki-brain": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["REPLACE_WITH_ABSOLUTE_PATH/mcp-server/server.py"],
+      "env": {
+        "WIKI_BRAIN_DIR": "REPLACE_WITH_ABSOLUTE_PATH/wiki"
+      }
+    }
+  }
+}

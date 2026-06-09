@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "wiki-brain": {
+      "command": "python",
+      "args": ["REPLACE_WITH_ABSOLUTE_PATH/mcp-server/server.py"],
+      "env": {
+        "WIKI_BRAIN_DIR": "REPLACE_WITH_ABSOLUTE_PATH/wiki"
+      }
+    }
+  }
+}

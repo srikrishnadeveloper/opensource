@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: wiki-brain-mcp
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: WIKI_BRAIN_DIR
+        value: /app/wiki
+      - key: MCP_TRANSPORT
+        value: streamable-http
+      - key: PORT
+        value: "8000"
+      - key: MCP_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        sync: false
+      - key: GITHUB_BRANCH
+        value: main
+    healthCheckPath: /health

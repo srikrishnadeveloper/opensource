@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+secrets.json
+
+# Personal raw exports (user adds locally)
+raw/
+
+# Obsidian workspace state
+wiki/.obsidian/workspace.json
+wiki/.obsidian/graph.json
+
+# OS
+Thumbs.db
+.DS_Store
+
+*.pem
+*_secrets*
