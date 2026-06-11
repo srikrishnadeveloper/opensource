@@ -135,7 +135,27 @@ def main():
     except Exception as e:
         test("get_status runs without error", False, str(e))
 
-    print("\n9. Performance")
+    print("\n9. ChatGPT connector compatibility (search + fetch shapes)")
+    import server as srv2
+
+    s_out = srv2.search("python")
+    test("search returns {results:[...]}", list(s_out.keys()) == ["results"], f"got {list(s_out.keys())}")
+    test("search has results", len(s_out["results"]) > 0, f"got {len(s_out['results'])}")
+    if s_out["results"]:
+        r0 = s_out["results"][0]
+        test("search result has id/title/url",
+             all(k in r0 for k in ("id", "title", "url")), f"got {list(r0)}")
+        f_out = srv2.fetch(r0["id"])
+        for k in ("id", "title", "text", "url", "metadata"):
+            test(f"fetch has '{k}'", k in f_out, f"got {list(f_out)}")
+        test("fetch returns full body", len(f_out.get("text", "")) > 20,
+             f"got {len(f_out.get('text', ''))} chars")
+        test("fetch metadata values are strings",
+             all(isinstance(v, str) for v in f_out.get("metadata", {}).values()))
+    miss = srv2.fetch("definitely-not-a-real-page-xyz")
+    test("fetch(missing) still returns text", bool(miss.get("text")))
+
+    print("\n10. Performance")
     t0 = time.time()
     for _ in range(50):
         engine.search("python mongodb task")

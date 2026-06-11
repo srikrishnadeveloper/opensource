@@ -23,6 +23,16 @@ Use this file to track fixes before a public release. Severity: **CRITICAL** →
 
 ---
 
+## CHATGPT-001 — ChatGPT connector could not display page markdown [FIXED 2026-06-11]
+
+| Field | Detail |
+|-------|--------|
+| **Files** | `mcp-server/server.py` — `search`, new `fetch` tool |
+| **Problem** | ChatGPT MCP connectors require two read tools matching OpenAI's schema: `search(query) -> {results:[{id,title,url}]}` and `fetch(id) -> {id,title,text,url,metadata}`. The server only had a `search` tool with a non-standard shape (extra `folder` param, custom `{query,count,results,summary}` output) and **no `fetch` tool**. ChatGPT could surface search hits but had no compliant way to retrieve a page's body, so the markdown content never displayed. |
+| **Fix** | `search` now takes only `query` and returns `{"results":[{id,title,url,text}]}`; added a `fetch(id)` tool returning the full (redacted) markdown as `{id,title,text,url,metadata}`. Both carry `readOnlyHint` annotations and emit the payload as `structuredContent` + JSON `content` text (FastMCP). Verified end-to-end over HTTP and in `test_server.py` (section 9). |
+
+---
+
 ## CRITICAL — fix before any public deploy with write tools
 
 ### SEC-001 — Path traversal in local write sync (`_write_local_copy`)
