@@ -25,4 +25,10 @@ services:
         generateValue: true
       - key: GITHUB_TOKEN
         sync: false
+      - key: NOTION_TOKEN
+        sync: false
+      - key: NOTION_DATABASE_ID
+        sync: false
+      - key: NOTION_PARENT_PAGE_ID
+        sync: false
     healthCheckPath: /health

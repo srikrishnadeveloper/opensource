@@ -142,7 +142,16 @@ def main():
     avg_ms = (time.time() - t0) / 50 * 1000
     test("search avg < 500ms", avg_ms < 500, f"avg {avg_ms:.1f}ms")
 
-    print("\n10. Render auto-config (GitHub repo/branch)")
+    print("\n10. Notion sync helpers")
+    import notion_sync as ns
+
+    fm, body = ns._parse_frontmatter("---\ntitle: Test\ntags: [a, b]\n---\n# Hi")
+    test("_parse_frontmatter title", fm.get("title") == "Test")
+    test("_parse_frontmatter body", body.startswith("# Hi"))
+    test("_parse_tags", ns._parse_tags('[ "x", "y" ]') == ["x", "y"])
+    test("_content_hash stable", len(ns._content_hash("abc")) == 64)
+
+    print("\n11. Render auto-config (GitHub repo/branch)")
     import os
     import writer as wr
 

@@ -24,6 +24,7 @@ TOOLS: 7 read · 9 write · 2 resources — see README.md
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -843,6 +844,25 @@ except ImportError:  # pragma: no cover
     get_writer = None  # type: ignore
     GitHubWriteError = RuntimeError  # type: ignore
 
+try:
+    from notion_sync import push_file_if_configured, NotionSync, NotionSyncError  # type: ignore
+except ImportError:  # pragma: no cover
+    push_file_if_configured = None  # type: ignore
+    NotionSync = None  # type: ignore
+    NotionSyncError = RuntimeError  # type: ignore
+
+
+async def _maybe_notion_push(rel_path: str) -> str:
+    """Best-effort Notion mirror after a GitHub write."""
+    if push_file_if_configured is None:
+        return ""
+    try:
+        msg = await push_file_if_configured(rel_path)
+        return f"\nNotion: {msg}" if msg else ""
+    except Exception as e:
+        log.warning("[notion] push failed for %s: %s", rel_path, e)
+        return f"\nNotion: sync skipped ({e})"
+
 
 def _rel_path_for(page: WikiPage) -> str:
     """Convert an absolute page path into a repo-relative POSIX path (wiki/folder/name.md)."""
@@ -1241,7 +1261,9 @@ async def create_page(
     _index_page_in_engine(engine, page)
 
     commit_url = result.get("commit", {}).get("html_url", "")
-    return f"Created wiki/{folder}/{name}.md\n{commit_url}"
+    rel_path = f"wiki/{folder}/{name}.md"
+    notion_note = await _maybe_notion_push(rel_path)
+    return f"Created {rel_path}\n{commit_url}{notion_note}"
 
 
 @mcp_server.tool()
@@ -1292,7 +1314,8 @@ async def update_page(name: str, content: str, reason: str = "") -> str:
     _write_local_copy(page.folder, page.stem, content)
 
     commit_url = result.get("commit", {}).get("html_url", "")
-    return f"Updated {rel_path}\n{commit_url}"
+    notion_note = await _maybe_notion_push(rel_path)
+    return f"Updated {rel_path}\n{commit_url}{notion_note}"
 
 
 @mcp_server.tool()
@@ -1341,7 +1364,45 @@ async def append_to_page(name: str, content: str, heading: str = "") -> str:
 
     commit_url = result.get("commit", {}).get("html_url", "")
     target = f"under '{heading}'" if heading else "at end"
-    return f"Appended to {rel_path} ({target})\n{commit_url}"
+    notion_note = await _maybe_notion_push(rel_path)
+    return f"Appended to {rel_path} ({target})\n{commit_url}{notion_note}"
+
+
+@mcp_server.tool()
+async def notion_sync_push(all_pages: bool = True) -> str:
+    """Push wiki markdown files to Notion (requires NOTION_TOKEN + NOTION_DATABASE_ID)."""
+    if NotionSync is None:
+        return "Error: notion_sync module not available."
+    try:
+        sync = NotionSync()
+        if all_pages:
+            lines = await sync.push_all()
+            return "\n".join(lines) if lines else "No wiki files to push."
+        return "Error: set all_pages=true or use create_page (auto-syncs one file)."
+    except NotionSyncError as e:
+        return f"Error: {e}"
+
+
+@mcp_server.tool()
+async def notion_sync_pull() -> str:
+    """Pull Notion edits into GitHub wiki (requires NOTION_TOKEN + GITHUB_TOKEN)."""
+    if NotionSync is None:
+        return "Error: notion_sync module not available."
+    try:
+        sync = NotionSync()
+        lines = await sync.pull_all()
+        return "\n".join(lines) if lines else "Nothing to pull."
+    except NotionSyncError as e:
+        return f"Error: {e}"
+
+
+@mcp_server.tool()
+async def notion_sync_status() -> str:
+    """Show Notion sync configuration and mapped page count."""
+    if NotionSync is None:
+        return "Error: notion_sync module not available."
+    sync = NotionSync()
+    return json.dumps(sync.status(), indent=2)
 
 
 @mcp_server.tool()
