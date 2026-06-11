@@ -1544,6 +1544,41 @@ def list_folders() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cloud startup — Render prints a copy-paste ChatGPT URL in service logs
+# ---------------------------------------------------------------------------
+
+def _is_render_runtime() -> bool:
+    return bool(os.environ.get("RENDER"))
+
+
+def _public_base_url() -> str | None:
+    """HTTPS base URL for this service (Render sets RENDER_EXTERNAL_URL)."""
+    url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    return url or None
+
+
+def _print_chatgpt_connector_banner(api_key: str) -> None:
+    """Emit a loud, copy-paste MCP URL — visible in Render → Logs."""
+    base = _public_base_url()
+    if not base:
+        return
+    mcp_url = f"{base}/mcp?token={api_key}"
+    writes = "enabled" if os.environ.get("GITHUB_TOKEN", "").strip() else "off (add GITHUB_TOKEN to enable)"
+    banner = f"""
+{'=' * 72}
+  WIKI BRAIN — ChatGPT connector (copy the line below)
+
+  {mcp_url}
+
+  Paste into ChatGPT → Settings → Connectors → Add MCP server.
+  Wiki writes: {writes}
+{'=' * 72}
+"""
+    print(banner, flush=True)
+    log.info("[SETUP] ChatGPT MCP URL printed above")
+
+
+# ---------------------------------------------------------------------------
 # Entry point — stdio (local) or streamable-http / sse (cloud)
 # LEARN: Running "python server.py" directly starts this block.
 #        Cursor instead runs the same file but connects via stdin/stdout (stdio).
@@ -1565,7 +1600,13 @@ if __name__ == "__main__":
         transport = "streamable-http"
 
     if transport in ("sse", "streamable-http"):
-        api_key = os.environ.get("MCP_API_KEY")
+        api_key = os.environ.get("MCP_API_KEY", "").strip() or None
+        if _is_render_runtime() and not api_key:
+            log.error(
+                "[AUTH] MCP_API_KEY is required on Render. "
+                "Use render.yaml with generateValue: true and redeploy."
+            )
+            sys.exit(1)
         if api_key:
             log.info("[AUTH] API key auth ENABLED — token required on all /mcp requests")
             # Monkey-patch FastMCP app factories to inject auth middleware into uvicorn.
@@ -1582,7 +1623,9 @@ if __name__ == "__main__":
 
             mcp_server.streamable_http_app = _secured_http  # type: ignore[method-assign]
             mcp_server.sse_app = _secured_sse              # type: ignore[method-assign]
+            if _is_render_runtime():
+                _print_chatgpt_connector_banner(api_key)
         else:
-            log.warning("[AUTH] MCP_API_KEY not set — server is PUBLIC. Set it on Render!")
+            log.warning("[AUTH] MCP_API_KEY not set — server is PUBLIC (local dev only)")
 
     mcp_server.run(transport=transport)
