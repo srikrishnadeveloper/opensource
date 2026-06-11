@@ -59,4 +59,13 @@ Group or filter by **Folder** in Notion for the same structure as your repo.
 
 - Notion-only blocks (buttons, synced blocks) are not round-tripped.
 - `[[wikilinks]]` are kept as text in Notion; links are not auto-resolved on first sync.
+- Notion may convert markdown tables to HTML on round-trip — prefer simple markdown in Notion edits.
 - Conflicts: last pull/push wins; use `sync` after editing in one place.
+- Deletes: `delete_page` archives the matching Notion row (does not hard-delete).
+
+## Tests
+
+```bash
+python mcp-server/test_notion_sync.py   # 27 offline tests (mocked)
+python mcp-server/notion_sync.py status # live config check
+```

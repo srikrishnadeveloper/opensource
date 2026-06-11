@@ -845,9 +845,15 @@ except ImportError:  # pragma: no cover
     GitHubWriteError = RuntimeError  # type: ignore
 
 try:
-    from notion_sync import push_file_if_configured, NotionSync, NotionSyncError  # type: ignore
+    from notion_sync import (  # type: ignore
+        push_file_if_configured,
+        delete_file_if_configured,
+        NotionSync,
+        NotionSyncError,
+    )
 except ImportError:  # pragma: no cover
     push_file_if_configured = None  # type: ignore
+    delete_file_if_configured = None  # type: ignore
     NotionSync = None  # type: ignore
     NotionSyncError = RuntimeError  # type: ignore
 
@@ -1436,7 +1442,17 @@ async def delete_page(name: str, reason: str) -> str:
     _deindex_page_in_engine(engine, page)
     _delete_local_copy(page.folder, page.stem)
 
-    return f"Deleted {rel_path} — {reason}"
+    notion_note = ""
+    if delete_file_if_configured is not None:
+        try:
+            msg = await delete_file_if_configured(rel_path)
+            if msg:
+                notion_note = f"\nNotion: {msg}"
+        except Exception as e:
+            log.warning("[notion] delete archive failed for %s: %s", rel_path, e)
+            notion_note = f"\nNotion: archive skipped ({e})"
+
+    return f"Deleted {rel_path} — {reason}{notion_note}"
 
 
 # ---------------------------------------------------------------------------
@@ -1645,8 +1661,21 @@ def _print_chatgpt_connector_banner(api_key: str) -> None:
 #        Cursor instead runs the same file but connects via stdin/stdout (stdio).
 # ---------------------------------------------------------------------------
 
+def _load_dotenv() -> None:
+    env_path = _REPO_ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        os.environ.setdefault(k.strip(), v.strip())
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
+    _load_dotenv()
 
     # Optional: pull latest wiki from git before indexing (local dev only)
     if os.environ.get("WIKI_AUTO_PULL", "").strip() in ("1", "true", "yes"):

@@ -111,6 +111,7 @@ class NotionClient:
         *,
         json_body: dict | None = None,
         markdown_api: bool = False,
+        _attempt: int = 0,
     ) -> dict:
         elapsed = time.monotonic() - self._last_req
         if elapsed < _RATE_DELAY:
@@ -130,6 +131,11 @@ class NotionClient:
                 timeout=60,
             )
         self._last_req = time.monotonic()
+        if r.status_code == 429 and _attempt < 3:
+            await asyncio.sleep(2.0 * (_attempt + 1))
+            return await self._request(
+                method, path, json_body=json_body, markdown_api=markdown_api, _attempt=_attempt + 1
+            )
         if r.status_code >= 400:
             raise NotionSyncError(f"Notion {method} {path} -> {r.status_code}: {r.text[:400]}")
         return r.json() if r.text else {}
@@ -250,6 +256,13 @@ class NotionClient:
         )
         return data.get("markdown", "")
 
+    async def archive_page(self, page_id: str) -> None:
+        await self._request(
+            "PATCH",
+            f"/pages/{page_id}",
+            json_body={"archived": True},
+        )
+
     @staticmethod
     def _prop_text(props: dict, key: str) -> str:
         val = props.get(key, {})
@@ -309,9 +322,11 @@ class SyncState:
 
 class NotionSync:
     def __init__(self, client: NotionClient | None = None, state: SyncState | None = None):
+        _load_dotenv()
         token = os.environ.get("NOTION_TOKEN", "").strip()
         self.client = client or NotionClient(token)
         self.state = state or SyncState()
+        self._path_index: dict[str, str] = {}
 
     async def setup(self, parent_page_id: str | None = None) -> str:
         parent = (
@@ -350,6 +365,20 @@ class NotionSync:
             "hash": _content_hash(text),
         }
 
+    async def _ensure_path_index(self) -> None:
+        if self._path_index:
+            return
+        db_id = self.state.database_id
+        if not db_id:
+            return
+        for page in await self.client.query_database(db_id):
+            props = page.get("properties", {})
+            rel = self.client._prop_text(props, "Path")
+            if rel:
+                self._path_index[rel] = page["id"]
+                if not self.state.get_page(rel):
+                    self.state.set_page(rel, {"notion_page_id": page["id"], "imported": True})
+
     async def push_file(self, rel_path: str) -> str:
         db_id = self.state.database_id
         if not db_id:
@@ -363,8 +392,12 @@ class NotionSync:
 
         meta = self._file_meta(path)
         rel = meta["rel"]
+        await self._ensure_path_index()
         entry = self.state.get_page(rel) or {}
-        page_id = entry.get("notion_page_id")
+        if entry.get("github_hash") == meta["hash"] and entry.get("notion_page_id"):
+            return f"skip {rel} (unchanged)"
+
+        page_id = entry.get("notion_page_id") or self._path_index.get(rel)
 
         if page_id:
             await self.client.update_db_properties(
@@ -398,24 +431,10 @@ class NotionSync:
         )
         return f"{action} {rel} -> Notion ({page_id})"
 
-    async def _index_existing_notion_pages(self) -> None:
-        """Map Path property -> notion_page_id for pages created outside sync state."""
-        db_id = self.state.database_id
-        if not db_id:
-            return
-        for page in await self.client.query_database(db_id):
-            props = page.get("properties", {})
-            rel = self.client._prop_text(props, "Path")
-            if rel and not self.state.get_page(rel):
-                self.state.set_page(
-                    rel,
-                    {"notion_page_id": page["id"], "imported": True},
-                )
-
     async def push_all(self) -> list[str]:
         if not self.state.database_id:
             await self.setup(os.environ.get("NOTION_PARENT_PAGE_ID") or None)
-        await self._index_existing_notion_pages()
+        await self._ensure_path_index()
 
         results = []
         for path in _iter_wiki_files():
@@ -442,7 +461,7 @@ class NotionSync:
         created = fm.get("created_at") or fm.get("created") or now
         safe_title = title.replace('"', "")
         lines = ["---", f'title: "{safe_title}"']
-        aliases = _parse_tags(fm.get("aliases", "")) if fm.get("aliases", "").startswith("[") else []
+        aliases = _parse_tags(fm.get("aliases", ""))
         if aliases:
             al = ", ".join(f'"{a}"' for a in aliases)
             lines.append(f"aliases: [{al}]")
@@ -478,20 +497,21 @@ class NotionSync:
             try:
                 body = await self.client.get_markdown(page_id)
                 notion_hash = _content_hash(body)
-                entry = self.state.get_page(rel) or {}
-                if entry.get("notion_hash") == notion_hash and entry.get("github_hash"):
-                    results.append(f"skip {rel} (unchanged)")
-                    continue
-
-                title = self.client._prop_text(props, "Name") or Path(rel).stem
-                folder = self.client._prop_text(props, "Folder") or "root"
-                tags = self.client._prop_tags(props)
                 local_path = _REPO_ROOT / rel
                 existing = local_path.read_text(encoding="utf-8") if local_path.exists() else None
+                title = self.client._prop_text(props, "Name") or Path(rel).stem
+                tags = self.client._prop_tags(props)
                 full = self._rebuild_wiki_file(
                     title=title, tags=tags, body=body, existing_full=existing
                 )
                 gh_hash = _content_hash(full)
+                entry = self.state.get_page(rel) or {}
+                if (
+                    entry.get("notion_hash") == notion_hash
+                    and entry.get("github_hash") == gh_hash
+                ):
+                    results.append(f"skip {rel} (unchanged)")
+                    continue
 
                 stem = Path(rel).stem
                 try:
@@ -499,16 +519,7 @@ class NotionSync:
                 except GitHubWriteError as e:
                     if "not found" not in str(e).lower():
                         raise
-                    if folder == "root":
-                        await writer.put_file(rel, full, f"notion sync: create {stem}")
-                    else:
-                        await writer.create_wiki_page(
-                            folder=folder,
-                            name=stem,
-                            content=body,
-                            title=title,
-                            tags=tags or None,
-                        )
+                    await writer.put_file(rel, full, f"notion sync: create {stem}")
 
                 local_path.parent.mkdir(parents=True, exist_ok=True)
                 local_path.write_text(full, encoding="utf-8")
@@ -534,6 +545,22 @@ class NotionSync:
         push_results = await self.push_all()
         return {"pull": pull_results, "push": push_results}
 
+    async def delete_file(self, rel_path: str) -> str:
+        """Archive Notion page when wiki file is deleted."""
+        rel = rel_path if rel_path.startswith("wiki/") else f"wiki/{rel_path}"
+        await self._ensure_path_index()
+        entry = self.state.get_page(rel) or {}
+        page_id = entry.get("notion_page_id") or self._path_index.get(rel)
+        if not page_id:
+            return f"skip {rel} (not in Notion)"
+        await self.client.archive_page(page_id)
+        pages = self.state.data.get("pages", {})
+        pages.pop(rel, None)
+        self.state.data["pages"] = pages
+        self._path_index.pop(rel, None)
+        self.state.save()
+        return f"archived {rel} in Notion"
+
     def status(self) -> dict[str, Any]:
         files = [_wiki_rel_path(p) for p in _iter_wiki_files()]
         mapped = self.state.data.get("pages", {})
@@ -542,17 +569,36 @@ class NotionSync:
             "wiki_files": len(files),
             "mapped_pages": len(mapped),
             "notion_configured": bool(os.environ.get("NOTION_TOKEN")),
+            "github_configured": bool(os.environ.get("GITHUB_TOKEN")),
         }
 
 
 async def push_file_if_configured(rel_path: str) -> str | None:
     """Called after GitHub writes. No-op if Notion is not configured."""
+    _load_dotenv()
     if not os.environ.get("NOTION_TOKEN", "").strip():
         return None
     if not os.environ.get("NOTION_DATABASE_ID", "").strip() and not _STATE_FILE.exists():
         return None
     sync = NotionSync()
+    # Clear cached hash so post-write push always runs
+    rel = rel_path if rel_path.startswith("wiki/") else f"wiki/{rel_path}"
+    entry = sync.state.get_page(rel)
+    if entry and "github_hash" in entry:
+        entry = dict(entry)
+        entry.pop("github_hash", None)
+        sync.state.set_page(rel, entry)
     return await sync.push_file(rel_path)
+
+
+async def delete_file_if_configured(rel_path: str) -> str | None:
+    _load_dotenv()
+    if not os.environ.get("NOTION_TOKEN", "").strip():
+        return None
+    if not os.environ.get("NOTION_DATABASE_ID", "").strip() and not _STATE_FILE.exists():
+        return None
+    sync = NotionSync()
+    return await sync.delete_file(rel_path)
 
 
 def _load_dotenv() -> None:
