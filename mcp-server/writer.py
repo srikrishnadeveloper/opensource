@@ -497,22 +497,40 @@ def _append_under_heading(current: str, new_text: str, heading: str | None) -> s
 _writer: GitHubWriter | None = None
 
 
+def github_repo_from_env() -> str:
+    """Repo slug for GitHub writes — explicit GITHUB_REPO or Render's linked repo."""
+    return (
+        os.environ.get("GITHUB_REPO", "").strip()
+        or os.environ.get("RENDER_GIT_REPO_SLUG", "").strip()
+    )
+
+
+def github_branch_from_env() -> str:
+    """Target branch — explicit GITHUB_BRANCH, Render deploy branch, or main."""
+    return (
+        os.environ.get("GITHUB_BRANCH", "").strip()
+        or os.environ.get("RENDER_GIT_BRANCH", "").strip()
+        or "main"
+    )
+
+
 def get_writer() -> GitHubWriter:
     """Lazy-init GitHubWriter from GITHUB_TOKEN / GITHUB_REPO / GITHUB_BRANCH."""
     global _writer
     if _writer is None:
         token = os.environ.get("GITHUB_TOKEN", "").strip()
-        repo = os.environ.get("GITHUB_REPO", "")
-        branch = os.environ.get("GITHUB_BRANCH", "master")
+        repo = github_repo_from_env()
+        branch = github_branch_from_env()
         if not token:
             raise GitHubWriteError(
                 "GITHUB_TOKEN not set — write tools disabled. "
-                "Create a fine-grained PAT with Contents: read+write on the wiki repo."
+                "On Render: paste a fine-grained PAT in Environment → GITHUB_TOKEN. "
+                "See docs/GITHUB.md."
             )
         if not repo or "/" not in repo:
             raise GitHubWriteError(
-                "GITHUB_REPO not set — use owner/repo (e.g. your-org/wiki-brain). "
-                "See docs/GITHUB.md."
+                "Could not resolve GitHub repo. On Render this is automatic "
+                "(RENDER_GIT_REPO_SLUG). Locally set GITHUB_REPO=owner/repo."
             )
         _writer = GitHubWriter(token=token, repo=repo, branch=branch)
     return _writer
