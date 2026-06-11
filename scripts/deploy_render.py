@@ -70,13 +70,18 @@ def client() -> httpx.Client:
     )
 
 
+def _unwrap(item: dict, key: str) -> dict:
+    """Render list endpoints wrap records as {cursor, service|owner|...}."""
+    return item.get(key) or item
+
+
 def owner_id(c: httpx.Client) -> str:
     r = c.get("/owners")
     r.raise_for_status()
     owners = r.json()
     if not owners:
         raise RuntimeError("No Render workspaces found for this API key")
-    owner = owners[0]
+    owner = _unwrap(owners[0], "owner")
     print(f"Using workspace: {owner.get('name', owner['id'])}")
     return owner["id"]
 
@@ -85,10 +90,44 @@ def find_service(c: httpx.Client, owner: str) -> dict | None:
     r = c.get("/services", params={"ownerId": owner, "name": SERVICE_NAME, "limit": 20})
     r.raise_for_status()
     for item in r.json():
-        svc = item.get("service") or item
+        svc = _unwrap(item, "service")
         if svc.get("name") == SERVICE_NAME:
             return svc
     return None
+
+
+def update_service(c: httpx.Client, service_id: str, repo: str, branch: str) -> None:
+    payload = {
+        "repo": f"https://github.com/{repo}",
+        "branch": branch,
+        "serviceDetails": {
+            "healthCheckPath": "/health",
+            "envSpecificDetails": {"dockerfilePath": "./Dockerfile"},
+        },
+    }
+    r = c.patch(f"/services/{service_id}", json=payload)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Update service failed ({r.status_code}): {r.text[:500]}")
+    print(f"Updated service repo={repo} branch={branch}")
+
+
+def ensure_env_vars(c: httpx.Client, service_id: str) -> str:
+    """Set required env vars; return MCP_API_KEY (create if missing)."""
+    required = {
+        "WIKI_BRAIN_DIR": "/app/wiki",
+        "MCP_TRANSPORT": "streamable-http",
+        "PORT": "8000",
+    }
+    mcp_key = env_var_value(c, service_id, "MCP_API_KEY")
+    if not mcp_key:
+        mcp_key = secrets.token_urlsafe(32)
+        required["MCP_API_KEY"] = mcp_key
+        print("Generated new MCP_API_KEY for Render service")
+    for key, value in required.items():
+        r = c.put(f"/services/{service_id}/env-vars/{key}", json={"value": value})
+        if r.status_code >= 400:
+            raise RuntimeError(f"Set env {key} failed ({r.status_code}): {r.text[:300]}")
+    return mcp_key
 
 
 def create_service(c: httpx.Client, owner: str, repo: str, branch: str) -> dict:
@@ -126,7 +165,7 @@ def trigger_deploy(c: httpx.Client, service_id: str) -> str:
     if r.status_code >= 400:
         r = c.post(f"/services/{service_id}/deploys", json={})
     r.raise_for_status()
-    deploy = r.json().get("deploy") or r.json()
+    deploy = _unwrap(r.json(), "deploy")
     deploy_id = deploy["id"]
     print(f"Deploy started: {deploy_id}")
     return deploy_id
@@ -137,7 +176,7 @@ def wait_deploy(c: httpx.Client, service_id: str, deploy_id: str, timeout_s: int
     while time.time() < deadline:
         r = c.get(f"/services/{service_id}/deploys/{deploy_id}")
         r.raise_for_status()
-        deploy = r.json().get("deploy") or r.json()
+        deploy = _unwrap(r.json(), "deploy")
         status = deploy.get("status", "unknown")
         print(f"  deploy status: {status}")
         if status == "live":
@@ -151,7 +190,7 @@ def wait_deploy(c: httpx.Client, service_id: str, deploy_id: str, timeout_s: int
 def service_url(c: httpx.Client, service_id: str) -> str:
     r = c.get(f"/services/{service_id}")
     r.raise_for_status()
-    svc = r.json().get("service") or r.json()
+    svc = _unwrap(r.json(), "service")
     details = svc.get("serviceDetails") or {}
     url = (details.get("url") or "").rstrip("/")
     if not url:
@@ -164,7 +203,7 @@ def env_var_value(c: httpx.Client, service_id: str, key: str) -> str | None:
     r = c.get(f"/services/{service_id}/env-vars")
     r.raise_for_status()
     for item in r.json():
-        ev = item.get("envVar") or item
+        ev = _unwrap(item, "envVar")
         if ev.get("key") == key:
             return ev.get("value")
     return None
@@ -209,10 +248,12 @@ def main() -> None:
         svc = find_service(c, owner)
         if svc:
             print(f"Found existing service: {svc['id']}")
+            update_service(c, svc["id"], repo, branch)
         else:
             svc = create_service(c, owner, repo, branch)
 
         service_id = svc["id"]
+        ensure_env_vars(c, service_id)
         deploy_id = trigger_deploy(c, service_id)
         wait_deploy(c, service_id, deploy_id)
 
