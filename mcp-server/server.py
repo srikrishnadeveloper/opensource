@@ -18,12 +18,16 @@ HOW IT RUNS:
   Local:  python server.py  →  stdio  →  Cursor spawns this as a subprocess
   Cloud:  Docker on Render  →  HTTP   →  ChatGPT calls https://you.onrender.com/mcp
 
-TOOLS: 7 read · 9 write · 2 resources — see README.md
+TOOLS: 8 read · 9 write · 2 resources — see README.md
+  ChatGPT connectors use the `search` + `fetch` pair (OpenAI MCP schema);
+  `search` returns {results:[{id,title,url}]} and `fetch` returns the full
+  markdown of a page by id so ChatGPT can display and cite it.
 """
 
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -36,6 +40,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import Any
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -447,8 +452,10 @@ mcp_server = FastMCP(
     port=int(os.environ.get("PORT", 8000)),
     instructions=(
         "You have access to the user's personal markdown wiki via Wiki Brain.\n\n"
-        "READ the wiki using: search, read_page, get_status, "
-        "list_pages, list_folders, get_people, get_stats.\n\n"
+        "READ the wiki using: search to find relevant pages, then fetch (by the "
+        "id returned from search) to read a page's full markdown content. Other "
+        "read tools: read_page, get_status, list_pages, list_folders, get_people, "
+        "get_stats.\n\n"
         "WRITE to the wiki when the user says things like 'add this', 'update', "
         "'remember this in my wiki', 'save this'. Use create_folder for a new "
         "empty directory (optional index page), create_page for new documents, "
@@ -474,47 +481,121 @@ def _get_engine() -> WikiEngine:
 #        structured_output=True means the AI gets JSON fields, not just a string.
 # ---------------------------------------------------------------------------
 
-@mcp_server.tool(structured_output=True)
-def search(query: str, folder: str = "") -> dict[str, Any]:
-    """Full-text search across all wiki pages. Returns ranked results with excerpts.
+def _page_id(page: "WikiPage") -> str:
+    """Stable identifier a client passes back to `fetch`. `folder/stem` keeps it
+    unique across folders and is resolvable by `engine.get_page` (handles the slash)."""
+    if page.folder and page.folder != "root":
+        return f"{page.folder}/{page.stem}"
+    return page.stem
+
+
+def _page_url(page: "WikiPage") -> str:
+    """Canonical URL for ChatGPT citations. Points at the source markdown on GitHub
+    when GITHUB_REPO is configured; otherwise a stable wiki:// reference."""
+    rel = f"{page.stem}.md" if (not page.folder or page.folder == "root") else f"{page.folder}/{page.stem}.md"
+    repo = os.environ.get("GITHUB_REPO", "").strip()
+    if repo:
+        branch = (os.environ.get("GITHUB_BRANCH", "main").strip() or "main")
+        return f"https://github.com/{repo}/blob/{branch}/wiki/{rel}"
+    return f"wiki://{rel}"
+
+
+# LEARN: ChatGPT (and deep research / company knowledge) require an MCP server to
+#        expose two read tools that match OpenAI's schema exactly:
+#          - search(query)  -> {"results": [{"id", "title", "url"}, ...]}
+#          - fetch(id)      -> {"id", "title", "text", "url", "metadata"}
+#        ChatGPT calls search first, then fetch(id) to pull a page's FULL markdown
+#        so it can display and cite it. Without a conforming fetch tool the
+#        connector finds pages but never shows their content.
+@mcp_server.tool(
+    structured_output=True,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+)
+def search(query: str) -> dict[str, Any]:
+    """Search the personal markdown wiki and return matching pages.
+
+    Returns a list of results, each with an `id` (pass it to `fetch` to read the
+    full page), a `title`, and a `url`. Use this first to find relevant pages,
+    then call `fetch` with a result's `id` to read its complete markdown content.
 
     Args:
-        query: Search terms (e.g., 'task tracker', 'python notes', 'mongodb')
-        folder: Optional folder filter — people, topics, projects, academics, personal, etc.
+        query: Search terms (e.g., 'task tracker', 'python notes', 'mongodb').
     """
     engine = _get_engine()
-    results = engine.search(query, folder=folder)
+    raw = engine.search(query)
 
-    # Filter out private pages + redact excerpts
-    safe_results = []
-    for r in results:
+    results: list[dict[str, Any]] = []
+    for r in raw:
         page = engine.pages.get(r["page"])
-        if page and sanitize.is_private(page):
+        if not page or sanitize.is_private(page):
             continue
-        r["excerpt"] = sanitize.redact(r.get("excerpt", ""))
-        safe_results.append(r)
-    results = safe_results
+        results.append({
+            "id":    _page_id(page),
+            "title": page.title,
+            "url":   _page_url(page),
+            # `text` is an optional snippet ChatGPT may show under the result.
+            "text":  sanitize.redact(r.get("excerpt", "")),
+        })
 
-    # Compact text summary for the LLM
-    if not results:
-        summary = f"No results for '{query}'" + (f" in folder '{folder}'" if folder else "")
+    # OpenAI's schema expects the structured payload to be exactly {"results": [...]}.
+    # FastMCP also emits this dict as JSON in the content array, satisfying the
+    # "both structuredContent and JSON-encoded text" requirement for connectors.
+    return {"results": results}
+
+
+@mcp_server.tool(
+    structured_output=True,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+)
+def fetch(id: str) -> dict[str, Any]:
+    """Fetch the full markdown content of a wiki page by its id.
+
+    Call this with an `id` returned by `search` (e.g. 'personal/profile' or
+    'profile'). Returns the page's complete markdown so it can be displayed and
+    cited.
+
+    Args:
+        id: The page identifier from a `search` result (folder/stem, stem, title, or alias).
+    """
+    engine = _get_engine()
+    page = engine.get_page(id)
+    if not page:
+        # ChatGPT expects a populated text field even when nothing is found.
+        return {
+            "id":       id,
+            "title":    "Not found",
+            "text":     f"No wiki page matches id '{id}'. Use `search` to find a valid id.",
+            "url":      "",
+            "metadata": {"found": "false"},
+        }
+
+    if sanitize.is_private(page):
+        text = sanitize.private_placeholder(page)
     else:
-        lines = [f"**{len(results)} results** for '{query}'" + (f" in `{folder}/`" if folder else "") + "\n"]
-        for r in results:
-            lines.append(f"- **{r['title']}** — `{r['folder']}/{r['page']}.md` (score {r['score']})")
-            lines.append(f"  > {r['excerpt']}")
-        summary = "\n".join(lines)
+        text = sanitize.redact(_truncate(page.body, max_chars=MAX_RESPONSE_CHARS))
 
+    # metadata values are strings — ChatGPT's fetch schema types metadata as
+    # an object of string values.
+    metadata = {
+        "folder":  page.folder,
+        "stem":    page.stem,
+        "tags":    ", ".join(page.tags or []),
+        "aliases": ", ".join(page.aliases or []),
+        "size_kb": str(round(page.size / 1024, 1)),
+    }
     return {
-        "query":   query,
-        "folder":  folder or "all",
-        "count":   len(results),
-        "results": results,
-        "summary": summary,
+        "id":       _page_id(page),
+        "title":    page.title,
+        "text":     text,
+        "url":      _page_url(page),
+        "metadata": metadata,
     }
 
 
-@mcp_server.tool(structured_output=True)
+@mcp_server.tool(
+    structured_output=True,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+)
 def read_page(name: str) -> dict[str, Any]:
     """Read a specific wiki page by name, title, or alias.
 
