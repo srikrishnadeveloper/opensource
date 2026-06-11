@@ -10,6 +10,7 @@ venv/
 .env.local
 .env.*.local
 secrets.json
+.wiki-brain/
 
 # Personal raw exports (user adds locally)
 raw/

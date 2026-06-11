@@ -19,6 +19,7 @@ This file mirrors `CLAUDE.md` for tools that discover `AGENTS.md` automatically 
 
 - Keep `wiki/` free of secrets and government IDs in the public fork.
 - Run `python mcp-server/test_server.py` after wiki or engine changes.
+- Run `python mcp-server/test_notion_sync.py` after Notion sync changes.
 - Write tools need `GITHUB_TOKEN` + `GITHUB_REPO` — see `docs/GITHUB.md`.
 
 ## Demo vs production

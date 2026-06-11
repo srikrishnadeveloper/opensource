@@ -1,71 +1,67 @@
 # Connect Wiki Brain to ChatGPT
 
-ChatGPT connects to MCP servers over **HTTP** (not stdio). Deploy Wiki Brain to Render, then add it as a custom connector.
+ChatGPT talks to MCP servers over **HTTP**. Deploy Wiki Brain to Render, then paste **one URL** from the Render logs.
 
 ## Prerequisites
 
-- Render account (free tier works)
-- GitHub fork of this repo
-- Strong `MCP_API_KEY` (random 32+ char string)
+- A [Render](https://render.com) account (free tier works)
+- A GitHub fork of this repo
+- (Optional) GitHub PAT — only for **write** tools
 
-## 1. Deploy to Render
+## Setup (2 minutes)
 
-### Option A — Blueprint
+### 1. Deploy to Render
 
-1. Push this `opensource/` folder to your GitHub repo
-2. Render → **New** → **Blueprint** → connect repo
-3. Render reads `render.yaml` automatically
+Follow **[docs/RENDER.md](RENDER.md)** — fork, Blueprint deploy, done.
 
-### Option B — Manual
+You do **not** manually invent an API key or repo name.
 
-1. New **Web Service** → Docker
-2. Dockerfile path: `./Dockerfile`
-3. Set environment variables (see below)
+### 2. Copy URL from Render logs
 
-## 2. Environment variables on Render
+After deploy, open **Render → your service → Logs**.
 
-| Variable | Required | Example |
-|----------|----------|---------|
-| `MCP_API_KEY` | Yes | random secret string |
-| `MCP_TRANSPORT` | Yes | `streamable-http` (set in Dockerfile) |
-| `GITHUB_TOKEN` | For writes | fine-grained PAT |
-| `GITHUB_REPO` | For writes | `you/wiki-brain` |
-| `GITHUB_BRANCH` | For writes | `main` |
-
-After deploy, note your URL: `https://wiki-brain-mcp-xxxx.onrender.com`
-
-## 3. Health check
-
-```bash
-curl https://YOUR-SERVICE.onrender.com/health
-```
-
-Expected: `{"status":"ok","service":"wiki-brain",...}`
-
-## 4. Add ChatGPT connector
-
-1. ChatGPT → **Settings** → **Connectors** (or Developer / MCP section)
-2. Add MCP server URL:
+Look for:
 
 ```
-https://YOUR-SERVICE.onrender.com/mcp
+  WIKI BRAIN — ChatGPT connector (copy the line below)
+
+  https://wiki-brain-mcp-xxxx.onrender.com/mcp?token=YOUR_AUTO_GENERATED_KEY
 ```
 
-3. Authentication: **Bearer token** = your `MCP_API_KEY`
+Copy that entire line.
 
-   If the UI only supports query auth:
+### 3. Add ChatGPT connector
 
-```
-https://YOUR-SERVICE.onrender.com/mcp?token=YOUR_MCP_API_KEY
-```
-
+1. ChatGPT → **Settings** → **Connectors** (or Developer / MCP)
+2. **Add MCP server**
+3. Paste the URL from Render logs
 4. Save and enable the connector in a new chat
+
+Test: *"Search my wiki for mongodb"* or *"What's in my task tracker project?"*
+
+## Optional: enable writes
+
+To let ChatGPT **edit** your wiki in the cloud:
+
+1. Create a fine-grained PAT — [docs/GITHUB.md](GITHUB.md)
+2. Render → **Environment** → `GITHUB_TOKEN` = your PAT
+3. **Restart** the service (or wait for redeploy)
+4. Logs will show `Wiki writes: enabled`
+
+## Authentication notes
+
+| Method | When |
+|--------|------|
+| `?token=` in URL | Easiest — included in the log banner (ChatGPT-friendly) |
+| `Authorization: Bearer …` | If the connector UI supports custom headers |
+
+The token is the auto-generated `MCP_API_KEY` — you never type it yourself; copy it from logs.
 
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
-| 401 Unauthorized | Check `MCP_API_KEY` matches Render env |
-| Empty search results | Redeploy after pushing wiki changes to GitHub |
-| Write tools fail | Set `GITHUB_TOKEN` + `GITHUB_REPO` on Render |
-| Cold start slow | Free tier sleeps after inactivity — first request wakes it |
+| 401 Unauthorized | Use the full URL from Render logs, including `?token=` |
+| Empty search | Wiki is baked at build time — push changes to GitHub and redeploy |
+| Write tools fail | Set `GITHUB_TOKEN` on Render |
+| Slow first message | Free tier cold start — retry after ~30 seconds |

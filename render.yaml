@@ -1,3 +1,13 @@
+# Wiki Brain — one-click Render deploy
+#
+# User steps:
+#   1. Fork this repo on GitHub
+#   2. Render Dashboard → New → Blueprint → connect your fork
+#   3. (Optional) Paste GITHUB_TOKEN for wiki write tools
+#   4. Open Render → Logs → copy the MCP URL → paste into ChatGPT Connectors
+#
+# Auto-configured (no user input): MCP_API_KEY, repo slug, branch, transport.
+
 services:
   - type: web
     name: wiki-brain-mcp
@@ -12,11 +22,13 @@ services:
       - key: PORT
         value: "8000"
       - key: MCP_API_KEY
-        sync: false
+        generateValue: true
       - key: GITHUB_TOKEN
         sync: false
-      - key: GITHUB_REPO
+      - key: NOTION_TOKEN
         sync: false
-      - key: GITHUB_BRANCH
-        value: main
+      - key: NOTION_DATABASE_ID
+        sync: false
+      - key: NOTION_PARENT_PAGE_ID
+        sync: false
     healthCheckPath: /health

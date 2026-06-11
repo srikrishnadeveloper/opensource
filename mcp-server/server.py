@@ -24,6 +24,7 @@ TOOLS: 7 read · 9 write · 2 resources — see README.md
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -843,6 +844,31 @@ except ImportError:  # pragma: no cover
     get_writer = None  # type: ignore
     GitHubWriteError = RuntimeError  # type: ignore
 
+try:
+    from notion_sync import (  # type: ignore
+        push_file_if_configured,
+        delete_file_if_configured,
+        NotionSync,
+        NotionSyncError,
+    )
+except ImportError:  # pragma: no cover
+    push_file_if_configured = None  # type: ignore
+    delete_file_if_configured = None  # type: ignore
+    NotionSync = None  # type: ignore
+    NotionSyncError = RuntimeError  # type: ignore
+
+
+async def _maybe_notion_push(rel_path: str) -> str:
+    """Best-effort Notion mirror after a GitHub write."""
+    if push_file_if_configured is None:
+        return ""
+    try:
+        msg = await push_file_if_configured(rel_path)
+        return f"\nNotion: {msg}" if msg else ""
+    except Exception as e:
+        log.warning("[notion] push failed for %s: %s", rel_path, e)
+        return f"\nNotion: sync skipped ({e})"
+
 
 def _rel_path_for(page: WikiPage) -> str:
     """Convert an absolute page path into a repo-relative POSIX path (wiki/folder/name.md)."""
@@ -1241,7 +1267,9 @@ async def create_page(
     _index_page_in_engine(engine, page)
 
     commit_url = result.get("commit", {}).get("html_url", "")
-    return f"Created wiki/{folder}/{name}.md\n{commit_url}"
+    rel_path = f"wiki/{folder}/{name}.md"
+    notion_note = await _maybe_notion_push(rel_path)
+    return f"Created {rel_path}\n{commit_url}{notion_note}"
 
 
 @mcp_server.tool()
@@ -1292,7 +1320,8 @@ async def update_page(name: str, content: str, reason: str = "") -> str:
     _write_local_copy(page.folder, page.stem, content)
 
     commit_url = result.get("commit", {}).get("html_url", "")
-    return f"Updated {rel_path}\n{commit_url}"
+    notion_note = await _maybe_notion_push(rel_path)
+    return f"Updated {rel_path}\n{commit_url}{notion_note}"
 
 
 @mcp_server.tool()
@@ -1341,7 +1370,45 @@ async def append_to_page(name: str, content: str, heading: str = "") -> str:
 
     commit_url = result.get("commit", {}).get("html_url", "")
     target = f"under '{heading}'" if heading else "at end"
-    return f"Appended to {rel_path} ({target})\n{commit_url}"
+    notion_note = await _maybe_notion_push(rel_path)
+    return f"Appended to {rel_path} ({target})\n{commit_url}{notion_note}"
+
+
+@mcp_server.tool()
+async def notion_sync_push(all_pages: bool = True) -> str:
+    """Push wiki markdown files to Notion (requires NOTION_TOKEN + NOTION_DATABASE_ID)."""
+    if NotionSync is None:
+        return "Error: notion_sync module not available."
+    try:
+        sync = NotionSync()
+        if all_pages:
+            lines = await sync.push_all()
+            return "\n".join(lines) if lines else "No wiki files to push."
+        return "Error: set all_pages=true or use create_page (auto-syncs one file)."
+    except NotionSyncError as e:
+        return f"Error: {e}"
+
+
+@mcp_server.tool()
+async def notion_sync_pull() -> str:
+    """Pull Notion edits into GitHub wiki (requires NOTION_TOKEN + GITHUB_TOKEN)."""
+    if NotionSync is None:
+        return "Error: notion_sync module not available."
+    try:
+        sync = NotionSync()
+        lines = await sync.pull_all()
+        return "\n".join(lines) if lines else "Nothing to pull."
+    except NotionSyncError as e:
+        return f"Error: {e}"
+
+
+@mcp_server.tool()
+async def notion_sync_status() -> str:
+    """Show Notion sync configuration and mapped page count."""
+    if NotionSync is None:
+        return "Error: notion_sync module not available."
+    sync = NotionSync()
+    return json.dumps(sync.status(), indent=2)
 
 
 @mcp_server.tool()
@@ -1375,7 +1442,17 @@ async def delete_page(name: str, reason: str) -> str:
     _deindex_page_in_engine(engine, page)
     _delete_local_copy(page.folder, page.stem)
 
-    return f"Deleted {rel_path} — {reason}"
+    notion_note = ""
+    if delete_file_if_configured is not None:
+        try:
+            msg = await delete_file_if_configured(rel_path)
+            if msg:
+                notion_note = f"\nNotion: {msg}"
+        except Exception as e:
+            log.warning("[notion] delete archive failed for %s: %s", rel_path, e)
+            notion_note = f"\nNotion: archive skipped ({e})"
+
+    return f"Deleted {rel_path} — {reason}{notion_note}"
 
 
 # ---------------------------------------------------------------------------
@@ -1544,13 +1621,61 @@ def list_folders() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cloud startup — Render prints a copy-paste ChatGPT URL in service logs
+# ---------------------------------------------------------------------------
+
+def _is_render_runtime() -> bool:
+    return bool(os.environ.get("RENDER"))
+
+
+def _public_base_url() -> str | None:
+    """HTTPS base URL for this service (Render sets RENDER_EXTERNAL_URL)."""
+    url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    return url or None
+
+
+def _print_chatgpt_connector_banner(api_key: str) -> None:
+    """Emit a loud, copy-paste MCP URL — visible in Render → Logs."""
+    base = _public_base_url()
+    if not base:
+        return
+    mcp_url = f"{base}/mcp?token={api_key}"
+    writes = "enabled" if os.environ.get("GITHUB_TOKEN", "").strip() else "off (add GITHUB_TOKEN to enable)"
+    banner = f"""
+{'=' * 72}
+  WIKI BRAIN — ChatGPT connector (copy the line below)
+
+  {mcp_url}
+
+  Paste into ChatGPT → Settings → Connectors → Add MCP server.
+  Wiki writes: {writes}
+{'=' * 72}
+"""
+    print(banner, flush=True)
+    log.info("[SETUP] ChatGPT MCP URL printed above")
+
+
+# ---------------------------------------------------------------------------
 # Entry point — stdio (local) or streamable-http / sse (cloud)
 # LEARN: Running "python server.py" directly starts this block.
 #        Cursor instead runs the same file but connects via stdin/stdout (stdio).
 # ---------------------------------------------------------------------------
 
+def _load_dotenv() -> None:
+    env_path = _REPO_ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        os.environ.setdefault(k.strip(), v.strip())
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
+    _load_dotenv()
 
     # Optional: pull latest wiki from git before indexing (local dev only)
     if os.environ.get("WIKI_AUTO_PULL", "").strip() in ("1", "true", "yes"):
@@ -1565,7 +1690,13 @@ if __name__ == "__main__":
         transport = "streamable-http"
 
     if transport in ("sse", "streamable-http"):
-        api_key = os.environ.get("MCP_API_KEY")
+        api_key = os.environ.get("MCP_API_KEY", "").strip() or None
+        if _is_render_runtime() and not api_key:
+            log.error(
+                "[AUTH] MCP_API_KEY is required on Render. "
+                "Use render.yaml with generateValue: true and redeploy."
+            )
+            sys.exit(1)
         if api_key:
             log.info("[AUTH] API key auth ENABLED — token required on all /mcp requests")
             # Monkey-patch FastMCP app factories to inject auth middleware into uvicorn.
@@ -1582,7 +1713,9 @@ if __name__ == "__main__":
 
             mcp_server.streamable_http_app = _secured_http  # type: ignore[method-assign]
             mcp_server.sse_app = _secured_sse              # type: ignore[method-assign]
+            if _is_render_runtime():
+                _print_chatgpt_connector_banner(api_key)
         else:
-            log.warning("[AUTH] MCP_API_KEY not set — server is PUBLIC. Set it on Render!")
+            log.warning("[AUTH] MCP_API_KEY not set — server is PUBLIC (local dev only)")
 
     mcp_server.run(transport=transport)
